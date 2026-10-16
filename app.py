@@ -89,6 +89,10 @@ st.sidebar.caption(
     "Select a date range and content categories."
 )
 
+# --------------------------------------------------
+# DATE RANGE FILTER
+# --------------------------------------------------
+
 min_date = df["date"].min().date()
 max_date = df["date"].max().date()
 
@@ -101,13 +105,9 @@ date_range = st.sidebar.date_input(
 
 if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
     start_date, end_date = date_range
-
-    filtered = df[
-        (df["date"].dt.date >= start_date)
-        & (df["date"].dt.date <= end_date)
-    ].copy()
 else:
-    filtered = df.copy()
+    start_date = min_date
+    end_date = max_date
 
 content_choice = st.sidebar.radio(
     "Explicit Content",
