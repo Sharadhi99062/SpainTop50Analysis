@@ -123,10 +123,15 @@ if content_choice == "Clean only":
 elif content_choice == "Explicit only":
     filtered = filtered[filtered["is_explicit"] == True]
 
+# Album Type Filter
+all_album_types = sorted(
+    df["album_type"].dropna().unique().tolist()
+)
+
 album_options = st.sidebar.multiselect(
     "Album Type",
-    sorted(filtered["album_type"].dropna().unique()),
-    default=sorted(filtered["album_type"].dropna().unique())
+    options=all_album_types,
+    default=all_album_types
 )
 
 filtered = filtered[
