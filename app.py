@@ -109,10 +109,10 @@ if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
 else:
     filtered = df.copy()
 
-content_options = st.sidebar.multiselect(
+content_choice = st.sidebar.radio(
     "Explicit Content",
-    ["Clean", "Explicit"],
-    default=["Clean", "Explicit"]
+    ["All", "Clean only", "Explicit only"],
+    index=0
 )
 
 if "Clean" not in content_options:
@@ -139,56 +139,146 @@ if filtered.empty:
 # LIFECYCLE STAGE CLASSIFICATION AND FILTER
 # --------------------------------------------------
 
-# Classify each daily playlist record using its observed ranking history.
-# A lower numerical position means a better ranking.
-stage_data = filtered.sort_values(["song_id", "date"]).copy()
-stage_data["entry_date"] = stage_data.groupby("song_id")["date"].transform("min")
+# IMPORTANT:
+# Calculate each song's entry date using the complete dataset,
+# not just the selected date range.
+
+stage_data = df.copy()
+
+stage_data = stage_data.sort_values(
+    ["song_id", "date"]
+).copy()
+
+# First appearance in the complete dataset
+stage_data["entry_date"] = (
+    stage_data.groupby("song_id")["date"]
+    .transform("min")
+)
+
+# Days since the song first appeared
 stage_data["days_since_entry"] = (
     stage_data["date"] - stage_data["entry_date"]
 ).dt.days
-stage_data["previous_position"] = stage_data.groupby("song_id")["position"].shift(1)
+
+# Previous playlist position
+stage_data["previous_position"] = (
+    stage_data.groupby("song_id")["position"]
+    .shift(1)
+)
+
+# Default lifecycle stage
 stage_data["lifecycle_stage"] = "Mature Phase"
 
-stage_data.loc[stage_data["days_since_entry"] <= 7, "lifecycle_stage"] = "New Entry"
+# 1. New Entry: first seven days
+stage_data.loc[
+    stage_data["days_since_entry"] <= 7,
+    "lifecycle_stage"
+] = "New Entry"
+
+# 2. Peak Phase: position 1–10 after the first seven days
 peak_mask = (
     (stage_data["days_since_entry"] > 7)
     & (stage_data["position"] <= 10)
 )
-stage_data.loc[peak_mask, "lifecycle_stage"] = "Peak Phase"
+
+stage_data.loc[
+    peak_mask,
+    "lifecycle_stage"
+] = "Peak Phase"
+
+# 3. Growth Phase: ranking improves
 growth_mask = (
     (stage_data["days_since_entry"] > 7)
     & (stage_data["position"] > 10)
     & stage_data["previous_position"].notna()
-    & (stage_data["position"] < stage_data["previous_position"])
+    & (
+        stage_data["position"]
+        < stage_data["previous_position"]
+    )
 )
-stage_data.loc[growth_mask, "lifecycle_stage"] = "Growth Phase"
+
+stage_data.loc[
+    growth_mask,
+    "lifecycle_stage"
+] = "Growth Phase"
+
+# 4. Decline Phase: ranking becomes worse
 decline_mask = (
     (stage_data["days_since_entry"] > 7)
     & (stage_data["position"] > 10)
     & stage_data["previous_position"].notna()
-    & (stage_data["position"] > stage_data["previous_position"])
+    & (
+        stage_data["position"]
+        > stage_data["previous_position"]
+    )
 )
-stage_data.loc[decline_mask, "lifecycle_stage"] = "Decline Phase"
 
+stage_data.loc[
+    decline_mask,
+    "lifecycle_stage"
+] = "Decline Phase"
+
+# Lifecycle stage options
 stage_options = [
-    "New Entry", "Growth Phase", "Peak Phase", "Mature Phase", "Decline Phase"
+    "New Entry",
+    "Growth Phase",
+    "Peak Phase",
+    "Mature Phase",
+    "Decline Phase"
 ]
+
+# Apply date range to the complete-history classification
+date_filtered = stage_data[
+    stage_data["date"].dt.date.between(
+        start_date,
+        end_date
+    )
+].copy()
+
+# Apply explicit-content filter
+if content_choice == "Clean only":
+    date_filtered = date_filtered[
+        date_filtered["is_explicit"] == False
+    ]
+elif content_choice == "Explicit only":
+    date_filtered = date_filtered[
+        date_filtered["is_explicit"] == True
+    ]
+
+# Apply album type filter
+date_filtered = date_filtered[
+    date_filtered["album_type"].isin(album_options)
+].copy()
+
+# Calculate distribution BEFORE applying the stage selector
+stage_counts = (
+    date_filtered["lifecycle_stage"]
+    .value_counts()
+    .reindex(stage_options, fill_value=0)
+)
+
+# Lifecycle stage selector
 selected_stages = st.sidebar.multiselect(
     "Lifecycle Stage",
     options=stage_options,
-    default=stage_options,
-    help="Choose which lifecycle stages to include in the song-level results and timeline."
+    default=stage_options
 )
 
 if not selected_stages:
     st.warning("Select at least one lifecycle stage.")
     st.stop()
 
-# Keep stage distribution based on all records matching the date/content filters.
-# Apply the lifecycle-stage filter to the data used by the remaining analyses.
-filtered = stage_data[stage_data["lifecycle_stage"].isin(selected_stages)].copy()
+# Apply selected stages to the remaining analyses
+filtered = date_filtered[
+    date_filtered["lifecycle_stage"].isin(
+        selected_stages
+    )
+].copy()
+
 if filtered.empty:
-    st.warning("No records match the selected lifecycle stages.")
+    st.warning(
+        "No records match the selected filters."
+    )
     st.stop()
 
 # --------------------------------------------------
