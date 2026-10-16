@@ -115,11 +115,13 @@ content_choice = st.sidebar.radio(
     index=0
 )
 
-if "Clean" not in content_options:
-    filtered = filtered[filtered["is_explicit"] == True]
+# Apply the explicit-content filter
 
-if "Explicit" not in content_options:
+if content_choice == "Clean only":
     filtered = filtered[filtered["is_explicit"] == False]
+
+elif content_choice == "Explicit only":
+    filtered = filtered[filtered["is_explicit"] == True]
 
 album_options = st.sidebar.multiselect(
     "Album Type",
