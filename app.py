@@ -134,9 +134,10 @@ album_options = st.sidebar.multiselect(
     default=all_album_types
 )
 
-filtered = filtered[
-    filtered["album_type"].isin(album_options)
-]
+# Apply album type filter to date_filtered
+filtered = date_filtered[
+    date_filtered["album_type"].isin(album_options)
+].copy()
 
 if filtered.empty:
     st.warning("No records match the selected filters.")
