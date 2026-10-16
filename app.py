@@ -3,9 +3,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --------------------------------------------------
-# PAGE CONFIGURATION
-# --------------------------------------------------
+# ============================================================
+# SPAIN TOP 50 SONGS ANALYSIS DASHBOARD
+# Required file in the same repository: Atlantic_Spain.csv
+# ============================================================
 
 st.set_page_config(
     page_title="Spain Top 50 Songs Analysis",
@@ -14,58 +15,119 @@ st.set_page_config(
 )
 
 st.title("🎵 Spain Top 50 Songs Analysis")
-st.subheader(
-    "Content Maturity, Release Lifecycle & Playlist Rotation"
-)
+st.subheader("Content Maturity, Release Lifecycle & Playlist Rotation")
 
-st.write(
-    "Analysis of Spain's Top 50 playlist for "
-    "Atlantic Recording Corporation."
-)
+STAGE_ORDER = [
+    "New Entry",
+    "Growth Phase",
+    "Peak Phase",
+    "Mature Phase",
+    "Decline Phase"
+]
 
-# --------------------------------------------------
-# LOAD DATASET
-# --------------------------------------------------
 
+# ----------------------- LOAD DATA ---------------------------
 @st.cache_data
 def load_data():
     data = pd.read_csv("Atlantic_Spain.csv")
 
-    data["date"] = pd.to_datetime(
-        data["date"],
-        format="%d-%m-%Y",
-        errors="coerce"
-    )
+    required = [
+        "date", "position", "song", "artist", "popularity",
+        "duration_ms", "album_type", "total_tracks", "is_explicit"
+    ]
+    missing = [col for col in required if col not in data.columns]
+    if missing:
+        raise ValueError(
+            "The CSV is missing required column(s): " + ", ".join(missing)
+        )
 
-    data["song"] = data["song"].astype(str).str.strip()
-    data["artist"] = data["artist"].astype(str).str.strip()
+    # The project CSV uses day-month-year dates. If some rows use another
+    # date format, try pandas' general parser for rows that failed.
+    parsed = pd.to_datetime(data["date"], format="%d-%m-%Y", errors="coerce")
+    remaining = parsed.isna()
+    if remaining.any():
+        parsed.loc[remaining] = pd.to_datetime(
+            data.loc[remaining, "date"], errors="coerce"
+        )
+    data["date"] = parsed
 
-    data["album_type"] = (
-        data["album_type"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-    )
+    for col in ["song", "artist", "album_type"]:
+        data[col] = data[col].astype("string").str.strip()
 
+    data["album_type"] = data["album_type"].str.lower()
+
+    for col in ["position", "popularity", "duration_ms", "total_tracks"]:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    explicit_map = {
+        "true": True, "false": False,
+        "1": True, "0": False,
+        "yes": True, "no": False
+    }
     data["is_explicit"] = (
-        data["is_explicit"]
-        .astype(str)
-        .str.lower()
-        .map({
-            "true": True,
-            "false": False
-        })
+        data["is_explicit"].astype("string").str.strip().str.lower()
+        .map(explicit_map)
     )
 
     data = data.dropna(
         subset=["date", "song", "artist", "position"]
-    )
+    ).copy()
+    data = data.drop_duplicates().copy()
 
     data["song_id"] = (
-        data["song"].str.lower()
+        data["song"].astype("string").str.lower().str.strip()
         + " | "
-        + data["artist"].str.lower()
+        + data["artist"].astype("string").str.lower().str.strip()
     )
+    data["duration_minutes"] = data["duration_ms"] / 60000
+
+    # Build lifecycle labels using the full dataset BEFORE dashboard filters.
+    data = data.sort_values(["song_id", "date", "position"]).copy()
+    data["entry_date"] = data.groupby("song_id")["date"].transform("min")
+    data["last_seen_date"] = data.groupby("song_id")["date"].transform("max")
+    data["days_since_entry"] = (
+        data["date"] - data["entry_date"]
+    ).dt.days
+    data["previous_position"] = data.groupby("song_id")["position"].shift(1)
+
+    # A stable rolling window uses the previous seven observations for each song.
+    data["top10_flag"] = (data["position"] <= 10).astype(int)
+    data["top10_observations_last7"] = (
+        data.groupby("song_id")["top10_flag"]
+        .transform(lambda s: s.rolling(7, min_periods=1).mean())
+    )
+
+    data["lifecycle_stage"] = "Mature Phase"
+
+    # First seven calendar days after first appearance.
+    new_mask = data["days_since_entry"] <= 7
+    data.loc[new_mask, "lifecycle_stage"] = "New Entry"
+
+    # Peak: sustained Top 10 presence among the last seven observations.
+    peak_mask = (
+        (data["days_since_entry"] > 7)
+        & (data["top10_observations_last7"] >= 0.70)
+    )
+    data.loc[peak_mask, "lifecycle_stage"] = "Peak Phase"
+
+    # Growth/decline labels apply outside the Top 10 after the new-entry period.
+    growth_mask = (
+        (data["days_since_entry"] > 7)
+        & (data["position"] > 10)
+        & data["previous_position"].notna()
+        & (data["position"] < data["previous_position"])
+        & ~peak_mask
+    )
+    data.loc[growth_mask, "lifecycle_stage"] = "Growth Phase"
+
+    decline_mask = (
+        (data["days_since_entry"] > 7)
+        & (data["position"] > 10)
+        & data["previous_position"].notna()
+        & (data["position"] > data["previous_position"])
+        & ~peak_mask
+    )
+    data.loc[decline_mask, "lifecycle_stage"] = "Decline Phase"
 
     return data
 
@@ -74,40 +136,41 @@ try:
     df = load_data()
 except FileNotFoundError:
     st.error(
-        "Atlantic_Spain.csv was not found. "
-        "Upload the dataset into the same folder as app.py."
+        "Cannot find Atlantic_Spain.csv. Upload it to the same GitHub "
+        "repository and folder as app.py."
     )
     st.stop()
+except Exception as exc:
+    st.error(f"Could not load the dataset: {exc}")
+    st.stop()
 
-# --------------------------------------------------
-# DATA VALIDATION
-# --------------------------------------------------
+if df.empty:
+    st.error("The dataset has no usable records after cleaning.")
+    st.stop()
 
+
+# ----------------------- SIDEBAR FILTERS ---------------------
 st.sidebar.header("Dashboard Filters")
-
-st.sidebar.caption(
-    "Select a date range and content categories."
-)
-
-# --------------------------------------------------
-# DATE RANGE FILTER
-# --------------------------------------------------
+st.sidebar.caption("Filters affect the records and charts shown below.")
 
 min_date = df["date"].min().date()
 max_date = df["date"].max().date()
 
-date_range = st.sidebar.date_input(
+selected_dates = st.sidebar.date_input(
     "Select date range",
     value=(min_date, max_date),
     min_value=min_date,
     max_value=max_date
 )
 
-if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-    start_date, end_date = date_range
+if isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 2:
+    start_date, end_date = selected_dates
+elif isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 1:
+    start_date = selected_dates[0]
+    end_date = selected_dates[0]
 else:
-    start_date = min_date
-    end_date = max_date
+    start_date = selected_dates
+    end_date = selected_dates
 
 content_choice = st.sidebar.radio(
     "Explicit Content",
@@ -115,610 +178,450 @@ content_choice = st.sidebar.radio(
     index=0
 )
 
-# Apply the explicit-content filter
-
-if content_choice == "Clean only":
-    filtered = filtered[filtered["is_explicit"] == False]
-
-elif content_choice == "Explicit only":
-    filtered = filtered[filtered["is_explicit"] == True]
-
-# Album Type Filter
-all_album_types = sorted(
-    df["album_type"].dropna().unique().tolist()
-)
-
-album_options = st.sidebar.multiselect(
+album_types = sorted(df["album_type"].dropna().unique().tolist())
+selected_album_types = st.sidebar.multiselect(
     "Album Type",
-    options=all_album_types,
-    default=all_album_types
+    options=album_types,
+    default=album_types
 )
 
-# Apply album type filter to date_filtered
-filtered = date_filtered[
-    date_filtered["album_type"].isin(album_options)
-].copy()
-
-if filtered.empty:
-    st.warning("No records match the selected filters.")
-    st.stop()
-
-# --------------------------------------------------
-# LIFECYCLE STAGE CLASSIFICATION AND FILTER
-# --------------------------------------------------
-
-# IMPORTANT:
-# Calculate each song's entry date using the complete dataset,
-# not just the selected date range.
-
-stage_data = df.copy()
-
-stage_data = stage_data.sort_values(
-    ["song_id", "date"]
-).copy()
-
-# First appearance in the complete dataset
-stage_data["entry_date"] = (
-    stage_data.groupby("song_id")["date"]
-    .transform("min")
+selected_stages = st.sidebar.multiselect(
+    "Lifecycle Stage",
+    options=STAGE_ORDER,
+    default=STAGE_ORDER
 )
 
-# Days since the song first appeared
-stage_data["days_since_entry"] = (
-    stage_data["date"] - stage_data["entry_date"]
-).dt.days
+# Filter in one predictable order. Lifecycle labels were already calculated
+# from full song history above.
+date_mask = df["date"].dt.date.between(start_date, end_date)
+date_filtered = df.loc[date_mask].copy()
 
-# Previous playlist position
-stage_data["previous_position"] = (
-    stage_data.groupby("song_id")["position"]
-    .shift(1)
-)
-
-# Default lifecycle stage
-stage_data["lifecycle_stage"] = "Mature Phase"
-
-# 1. New Entry: first seven days
-stage_data.loc[
-    stage_data["days_since_entry"] <= 7,
-    "lifecycle_stage"
-] = "New Entry"
-
-# 2. Peak Phase: position 1–10 after the first seven days
-peak_mask = (
-    (stage_data["days_since_entry"] > 7)
-    & (stage_data["position"] <= 10)
-)
-
-stage_data.loc[
-    peak_mask,
-    "lifecycle_stage"
-] = "Peak Phase"
-
-# 3. Growth Phase: ranking improves
-growth_mask = (
-    (stage_data["days_since_entry"] > 7)
-    & (stage_data["position"] > 10)
-    & stage_data["previous_position"].notna()
-    & (
-        stage_data["position"]
-        < stage_data["previous_position"]
-    )
-)
-
-stage_data.loc[
-    growth_mask,
-    "lifecycle_stage"
-] = "Growth Phase"
-
-# 4. Decline Phase: ranking becomes worse
-decline_mask = (
-    (stage_data["days_since_entry"] > 7)
-    & (stage_data["position"] > 10)
-    & stage_data["previous_position"].notna()
-    & (
-        stage_data["position"]
-        > stage_data["previous_position"]
-    )
-)
-
-stage_data.loc[
-    decline_mask,
-    "lifecycle_stage"
-] = "Decline Phase"
-
-# Lifecycle stage options
-stage_options = [
-    "New Entry",
-    "Growth Phase",
-    "Peak Phase",
-    "Mature Phase",
-    "Decline Phase"
-]
-
-# Apply date range to the complete-history classification
-date_filtered = stage_data[
-    stage_data["date"].dt.date.between(
-        start_date,
-        end_date
-    )
-].copy()
-
-# Apply explicit-content filter
 if content_choice == "Clean only":
-    date_filtered = date_filtered[
-        date_filtered["is_explicit"] == False
-    ]
+    date_filtered = date_filtered[date_filtered["is_explicit"] == False].copy()
 elif content_choice == "Explicit only":
-    date_filtered = date_filtered[
-        date_filtered["is_explicit"] == True
-    ]
+    date_filtered = date_filtered[date_filtered["is_explicit"] == True].copy()
 
-# Apply album type filter
 date_filtered = date_filtered[
-    date_filtered["album_type"].isin(album_options)
+    date_filtered["album_type"].isin(selected_album_types)
 ].copy()
 
-# Calculate distribution BEFORE applying the stage selector
 stage_counts = (
     date_filtered["lifecycle_stage"]
     .value_counts()
-    .reindex(stage_options, fill_value=0)
+    .reindex(STAGE_ORDER, fill_value=0)
 )
 
-# Lifecycle stage selector
-selected_stages = st.sidebar.multiselect(
-    "Lifecycle Stage",
-    options=stage_options,
-    default=stage_options
-)
-
-if not selected_stages:
-    st.warning("Select at least one lifecycle stage.")
-    st.stop()
-
-# Apply selected stages to the remaining analyses
 filtered = date_filtered[
-    date_filtered["lifecycle_stage"].isin(
-        selected_stages
-    )
+    date_filtered["lifecycle_stage"].isin(selected_stages)
 ].copy()
 
-if filtered.empty:
-    st.warning(
-        "No records match the selected filters."
-    )
+if date_filtered.empty:
+    st.warning("No records match the selected date, content, and album filters.")
     st.stop()
 
-# --------------------------------------------------
-# SONG LIFECYCLE
-# --------------------------------------------------
+if not selected_stages:
+    st.warning("Select at least one lifecycle stage in the sidebar.")
+    st.stop()
 
+if filtered.empty:
+    st.warning("No records match the selected lifecycle stages.")
+    st.stop()
+
+
+# ----------------------- SONG-LEVEL TABLES -------------------
+# Selected-period summary, so the numbers match the chosen date range.
 lifecycle = filtered.groupby("song_id").agg(
     song=("song", "first"),
     artist=("artist", "first"),
-    entry_date=("date", "min"),
-    last_seen_date=("date", "max"),
+    entry_date=("entry_date", "first"),
+    last_seen_in_selected_period=("date", "max"),
     observed_playlist_days=("date", "nunique"),
     peak_position=("position", "min"),
     average_position=("position", "mean"),
     average_popularity=("popularity", "mean"),
-    duration_ms=("duration_ms", "first"),
+    duration_ms=("duration_ms", "median"),
+    total_tracks=("total_tracks", "first"),
     is_explicit=("is_explicit", "first"),
-    album_type=("album_type", "first")
+    album_type=("album_type", "first"),
+    lifecycle_stage=("lifecycle_stage", "last")
 ).reset_index()
 
-peak_rows = (
-    filtered.sort_values(["song_id", "position", "date"])
-    .drop_duplicates("song_id")
-    [["song_id", "date"]]
-    .rename(columns={"date": "peak_date"})
+# Peak position date from each song's full available history.
+peak_dates = (
+    df.sort_values(["song_id", "position", "date"])
+    .drop_duplicates("song_id")[["song_id", "date"]]
+    .rename(columns={"date": "peak_position_date"})
 )
-
-lifecycle = lifecycle.merge(
-    peak_rows,
-    on="song_id",
-    how="left"
-)
-
-lifecycle["time_to_peak_days"] = (
-    lifecycle["peak_date"] - lifecycle["entry_date"]
+lifecycle = lifecycle.merge(peak_dates, on="song_id", how="left")
+lifecycle["days_to_peak_position"] = (
+    lifecycle["peak_position_date"] - lifecycle["entry_date"]
 ).dt.days
+lifecycle["duration_minutes"] = lifecycle["duration_ms"] / 60000
 
-lifecycle["duration_minutes"] = (
-    lifecycle["duration_ms"] / 60000
-)
 
-# --------------------------------------------------
-# DAILY PLAYLIST ROTATION
-# --------------------------------------------------
+# ----------------------- PLAYLIST ROTATION -------------------
+# Churn is calculated independently of the lifecycle-stage filter so selecting
+# one stage does not falsely change the playlist's entry/exit counts.
+rotation_source = df[
+    df["date"].dt.date.between(start_date, end_date)
+].copy()
 
-daily_songs = (
-    filtered.groupby("date")["song_id"]
+if content_choice == "Clean only":
+    rotation_source = rotation_source[
+        rotation_source["is_explicit"] == False
+    ].copy()
+elif content_choice == "Explicit only":
+    rotation_source = rotation_source[
+        rotation_source["is_explicit"] == True
+    ].copy()
+
+rotation_source = rotation_source[
+    rotation_source["album_type"].isin(selected_album_types)
+].copy()
+
+daily_sets = (
+    rotation_source.groupby("date")["song_id"]
     .apply(set)
     .sort_index()
 )
 
-churn_records = []
+rotation_rows = []
 previous_songs = None
-
-for date, current_songs in daily_songs.items():
-
+for day, current_songs in daily_sets.items():
     if previous_songs is None:
         entries = 0
         exits = 0
+        retained = len(current_songs)
+        churn_pct = np.nan
+        retention_pct = np.nan
     else:
         entries = len(current_songs - previous_songs)
         exits = len(previous_songs - current_songs)
+        retained = len(current_songs & previous_songs)
+        churn_pct = (
+            (entries + exits) / (2 * max(len(current_songs), len(previous_songs))) * 100
+            if max(len(current_songs), len(previous_songs)) else np.nan
+        )
+        retention_pct = (
+            retained / len(previous_songs) * 100 if previous_songs else np.nan
+        )
 
-    churn_records.append({
-        "date": date,
+    rotation_rows.append({
+        "date": day,
+        "playlist_song_count": len(current_songs),
         "new_entries": entries,
         "exits": exits,
-        "songs_retained": (
-            len(current_songs & previous_songs)
-            if previous_songs is not None
-            else 0
-        )
+        "songs_retained": retained,
+        "churn_percent": churn_pct,
+        "retention_percent": retention_pct
     })
-
     previous_songs = current_songs
 
-churn_df = pd.DataFrame(churn_records)
+rotation = pd.DataFrame(rotation_rows)
 
-# --------------------------------------------------
-# OVERVIEW KPIs
-# --------------------------------------------------
 
+# ----------------------- OVERVIEW KPIs -----------------------
 st.header("1. Overview")
+c1, c2, c3, c4 = st.columns(4)
 
-# Core dashboard metrics
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric(
-    "Unique Songs",
-    f"{lifecycle['song_id'].nunique():,}"
-)
-
-col2.metric(
-    "Average Days on Playlist",
+c1.metric("Unique Songs", f"{lifecycle['song_id'].nunique():,}")
+c2.metric(
+    "Average Playlist Days",
     f"{lifecycle['observed_playlist_days'].mean():.2f}"
+    if not lifecycle.empty else "N/A"
+)
+mean_peak_days = lifecycle["days_to_peak_position"].mean()
+c3.metric(
+    "Average Entry-to-Peak Time",
+    f"{mean_peak_days:.2f} days" if pd.notna(mean_peak_days) else "N/A"
+)
+mean_churn = rotation["churn_percent"].dropna().mean()
+c4.metric(
+    "Average Playlist Churn",
+    f"{mean_churn:.2f}%" if pd.notna(mean_churn) else "N/A"
 )
 
-average_entry_to_peak = lifecycle["time_to_peak_days"].mean()
-col3.metric(
-    "Entry-to-Peak Time",
-    f"{average_entry_to_peak:.2f} days" if pd.notna(average_entry_to_peak) else "N/A"
+c5, c6, c7, c8 = st.columns(4)
+mean_retention = rotation["retention_percent"].dropna().mean()
+c5.metric(
+    "Average Retention",
+    f"{mean_retention:.2f}%" if pd.notna(mean_retention) else "N/A"
+)
+c6.metric(
+    "Average Popularity",
+    f"{lifecycle['average_popularity'].mean():.2f}"
+    if lifecycle["average_popularity"].notna().any() else "N/A"
+)
+c7.metric(
+    "Explicit Songs",
+    f"{lifecycle.loc[lifecycle['is_explicit'] == True, 'song_id'].nunique():,}"
+)
+c8.metric(
+    "Clean Songs",
+    f"{lifecycle.loc[lifecycle['is_explicit'] == False, 'song_id'].nunique():,}"
 )
 
-if len(churn_df) > 1:
-    average_churn = (churn_df["new_entries"].iloc[1:].mean() / 50) * 100
-    average_retention = (churn_df["songs_retained"].iloc[1:].mean() / 50) * 100
-else:
-    average_churn = 0
-    average_retention = 0
-
-col4.metric(
-    "Playlist Churn Rate",
-    f"{average_churn:.2f}%"
-)
-
-st.subheader(" ")
-kpi5, kpi6, kpi7 = st.columns(3)
-
-kpi5.metric(
-    "Retention Stability Index",
-    f"{average_retention:.2f}%"
-)
-
-
-# Project-defined relative longevity index: Clean songs are the 100-point reference.
-explicit_kpi_data = lifecycle.dropna(subset=["is_explicit"]).copy()
-clean_avg_days = explicit_kpi_data.loc[
-    explicit_kpi_data["is_explicit"] == False, "observed_playlist_days"
-].mean()
-explicit_avg_days = explicit_kpi_data.loc[
-    explicit_kpi_data["is_explicit"] == True, "observed_playlist_days"
-].mean()
-
-if pd.notna(clean_avg_days) and clean_avg_days > 0 and pd.notna(explicit_avg_days):
-    explicit_lifecycle_score = (explicit_avg_days / clean_avg_days) * 100
-    explicit_score_text = f"{explicit_lifecycle_score:.1f}"
-else:
-    explicit_score_text = "N/A"
-
-kpi6.metric(
-    "Explicit Content Lifecycle Score",
-    explicit_score_text
+st.caption(
+    "Lifecycle labels are rule-based analytical categories. The date range "
+    "controls displayed records; stage labels use each song's full available history."
 )
 
 
-single_avg_days = lifecycle.loc[
-    lifecycle["album_type"].astype(str).str.lower() == "single",
-    "observed_playlist_days"
-].mean()
-album_avg_days = lifecycle.loc[
-    lifecycle["album_type"].astype(str).str.lower() == "album",
-    "observed_playlist_days"
-].mean()
-
-if pd.notna(single_avg_days) and pd.notna(album_avg_days) and album_avg_days > 0:
-    longevity_ratio = single_avg_days / album_avg_days
-    longevity_ratio_text = f"{longevity_ratio:.2f}×"
-else:
-    longevity_ratio_text = "N/A"
-
-kpi7.metric(
-    "Single vs Album Longevity Ratio",
-    longevity_ratio_text
-)
-
-
-# --------------------------------------------------
-# LIFECYCLE ANALYSIS
-# --------------------------------------------------
-
+# ----------------------- LIFECYCLE VISUALIZER ----------------
 st.header("2. Song Lifecycle Analysis")
 
-st.write("Song-level lifecycle summary")
+with st.expander("View song lifecycle summary table", expanded=True):
+    st.dataframe(
+        lifecycle.sort_values("observed_playlist_days", ascending=False),
+        use_container_width=True,
+        hide_index=True
+    )
 
-display_columns = [
-    "song",
-    "artist",
-    "entry_date",
-    "last_seen_date",
-    "observed_playlist_days",
-    "peak_position",
-    "time_to_peak_days",
-    "average_popularity"
-]
-
-st.dataframe(
-    lifecycle[display_columns].sort_values(
-        "observed_playlist_days",
-        ascending=False
-    ),
-    use_container_width=True
-)
-
-fig, ax = plt.subplots(figsize=(10, 4))
-
-ax.hist(
-    lifecycle["observed_playlist_days"],
-    bins=20
-)
-
-ax.set_title("Distribution of Observed Playlist Days")
-ax.set_xlabel("Observed Playlist Days")
-ax.set_ylabel("Number of Songs")
-
+st.subheader("Lifecycle Stage Distribution")
+stage_chart = stage_counts.rename_axis("Lifecycle Stage").reset_index(name="Record Count")
+fig, ax = plt.subplots(figsize=(9, 4))
+ax.bar(stage_chart["Lifecycle Stage"], stage_chart["Record Count"])
+ax.set_ylabel("Playlist Records")
+ax.set_xlabel("Lifecycle Stage")
+ax.tick_params(axis="x", rotation=25)
+ax.set_title("Distribution of Lifecycle Stages in Selected Period")
+plt.tight_layout()
 st.pyplot(fig)
 plt.close(fig)
-
-# Lifecycle stage distribution (uses date/content/album filters, before stage filter).
-st.subheader("Lifecycle Stage Distribution")
-stage_counts = (
-    stage_data["lifecycle_stage"]
-    .value_counts()
-    .reindex(stage_options, fill_value=0)
-)
-st.bar_chart(stage_counts)
 
 st.subheader("Song Lifecycle Timeline")
-timeline_songs = (
-    filtered[["song_id", "song", "artist"]]
-    .drop_duplicates()
-    .sort_values(["artist", "song"])
-)
-timeline_labels = {
-    row["song_id"]: f'{row["song"]} — {row["artist"]}'
-    for _, row in timeline_songs.iterrows()
-}
-selected_song_id = st.selectbox(
-    "Select a song to view its playlist ranking over time",
-    options=timeline_songs["song_id"].tolist(),
-    format_func=lambda song_id: timeline_labels.get(song_id, song_id)
-)
-timeline = filtered[filtered["song_id"] == selected_song_id].sort_values("date")
-if not timeline.empty:
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(timeline["date"], timeline["position"], marker="o")
-    ax.set_title(f'Playlist Ranking Over Time: {timeline.iloc[0]["song"]}')
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Playlist Position (1 is best)")
-    ax.invert_yaxis()
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    st.pyplot(fig)
-    plt.close(fig)
-   
-
-# --------------------------------------------------
-# PLAYLIST ROTATION
-# --------------------------------------------------
-
-st.header("3. Playlist Rotation")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Daily Entries and Exits")
-
-    fig, ax = plt.subplots(figsize=(9, 4))
-
-    ax.plot(
-        churn_df["date"],
-        churn_df["new_entries"],
-        label="New Entries"
+timeline_pool = filtered[["song_id", "song", "artist"]].drop_duplicates()
+timeline_pool = timeline_pool.sort_values(["artist", "song"])
+if timeline_pool.empty:
+    st.info("No songs are available for the timeline with the current filters.")
+else:
+    label_map = {
+        row["song_id"]: f'{row["song"]} — {row["artist"]}'
+        for _, row in timeline_pool.iterrows()
+    }
+    chosen_song = st.selectbox(
+        "Select a song to view its playlist ranking over time",
+        options=timeline_pool["song_id"].tolist(),
+        format_func=lambda value: label_map.get(value, value)
     )
+    timeline = filtered[filtered["song_id"] == chosen_song].sort_values("date")
+    if not timeline.empty:
+        fig, ax = plt.subplots(figsize=(11, 4))
+        ax.plot(timeline["date"], timeline["position"], marker="o")
+        ax.set_title(f'Playlist Ranking Over Time: {timeline.iloc[0]["song"]}')
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Position (1 = highest rank)")
+        ax.invert_yaxis()
+        ax.grid(True, alpha=0.25)
+        plt.xticks(rotation=35)
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
 
-    ax.plot(
-        churn_df["date"],
-        churn_df["exits"],
-        label="Exits"
-    )
+st.subheader("Lifecycle Stage Comparison")
+stage_comparison = date_filtered.groupby("lifecycle_stage").agg(
+    records=("song_id", "size"),
+    unique_songs=("song_id", "nunique"),
+    average_popularity=("popularity", "mean"),
+    average_position=("position", "mean")
+).reindex(STAGE_ORDER).reset_index()
+st.dataframe(stage_comparison.round(2), use_container_width=True, hide_index=True)
 
+
+# ----------------------- ENTRY / EXIT AND CHURN ---------------
+st.header("3. Playlist Rotation and Churn Analytics")
+left, right = st.columns(2)
+
+with left:
+    st.subheader("Daily Entries vs Exits")
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(rotation["date"], rotation["new_entries"], marker="o", label="New entries")
+    ax.plot(rotation["date"], rotation["exits"], marker="o", label="Exits")
     ax.set_xlabel("Date")
-    ax.set_ylabel("Number of Songs")
+    ax.set_ylabel("Number of songs")
     ax.legend()
-
-    plt.xticks(rotation=45)
+    ax.grid(True, alpha=0.25)
+    plt.xticks(rotation=35)
     plt.tight_layout()
-
     st.pyplot(fig)
     plt.close(fig)
 
-with col2:
-    st.subheader("Monthly Playlist Rotation")
+with right:
+    st.subheader("Daily Churn vs Retention")
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(rotation["date"], rotation["churn_percent"], marker="o", label="Churn (%)")
+    ax.plot(rotation["date"], rotation["retention_percent"], marker="o", label="Retention (%)")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Percent")
+    ax.legend()
+    ax.grid(True, alpha=0.25)
+    plt.xticks(rotation=35)
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
 
-    monthly = churn_df.set_index("date").resample("MS").agg(
-        new_entries=("new_entries", "sum"),
-        exits=("exits", "sum")
+st.subheader("Monthly Playlist Rotation")
+if not rotation.empty:
+    monthly = rotation.set_index("date").resample("MS").agg(
+        total_entries=("new_entries", "sum"),
+        total_exits=("exits", "sum"),
+        average_churn_percent=("churn_percent", "mean"),
+        average_retention_percent=("retention_percent", "mean")
     )
+    st.bar_chart(monthly[["total_entries", "total_exits"]])
+    st.dataframe(monthly.round(2), use_container_width=True)
 
-    st.bar_chart(monthly)
 
-# --------------------------------------------------
-# CONTENT MATURITY
-# --------------------------------------------------
+# ----------------------- EXPLICIT VS CLEAN -------------------
+st.header("4. Content Maturity: Explicit vs Clean")
+explicit_rows = lifecycle.copy()
+explicit_rows["content_type"] = explicit_rows["is_explicit"].map(
+    {True: "Explicit", False: "Clean"}
+).fillna("Unknown")
 
-st.header("4. Explicit vs Clean Songs")
-
-explicit_summary = lifecycle.groupby("is_explicit").agg(
-    total_songs=("song_id", "nunique"),
+explicit_summary = explicit_rows.groupby("content_type").agg(
+    unique_songs=("song_id", "nunique"),
     average_playlist_days=("observed_playlist_days", "mean"),
     average_peak_position=("peak_position", "mean"),
     average_popularity=("average_popularity", "mean"),
-    average_time_to_peak=("time_to_peak_days", "mean")
+    average_days_to_peak=("days_to_peak_position", "mean")
 ).reset_index()
+st.dataframe(explicit_summary.round(2), use_container_width=True, hide_index=True)
 
-explicit_summary["content_type"] = (
-    explicit_summary["is_explicit"]
-    .map({True: "Explicit", False: "Clean"})
-)
-
-st.dataframe(
-    explicit_summary.drop(columns=["is_explicit"]).round(2),
-    use_container_width=True
-)
-
+if not explicit_summary.empty:
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(explicit_summary["content_type"], explicit_summary["average_playlist_days"])
+    ax.set_title("Average Playlist Days: Explicit vs Clean")
+    ax.set_ylabel("Average days in selected period")
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
 
 
-fig, ax = plt.subplots(figsize=(8, 4))
-
-ax.bar(
-    explicit_summary["content_type"],
-    explicit_summary["average_playlist_days"]
-)
-
-ax.set_title("Average Observed Playlist Days")
-ax.set_ylabel("Days")
-
-st.pyplot(fig)
-plt.close(fig)
-
-# --------------------------------------------------
-# SINGLE VS ALBUM
-# --------------------------------------------------
-
+# ----------------------- ALBUM TYPE AND SIZE -----------------
 st.header("5. Single vs Album Analysis")
-
-album_summary = lifecycle.groupby("album_type").agg(
-    total_songs=("song_id", "nunique"),
+album_summary = lifecycle.groupby("album_type", dropna=False).agg(
+    unique_songs=("song_id", "nunique"),
     average_playlist_days=("observed_playlist_days", "mean"),
     average_peak_position=("peak_position", "mean"),
     average_popularity=("average_popularity", "mean"),
-    average_time_to_peak=("time_to_peak_days", "mean")
+    average_days_to_peak=("days_to_peak_position", "mean")
 ).reset_index()
+st.dataframe(album_summary.round(2), use_container_width=True, hide_index=True)
 
-st.dataframe(album_summary.round(2), use_container_width=True)
+if not album_summary.empty:
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(album_summary["album_type"].astype(str), album_summary["average_playlist_days"])
+    ax.set_title("Average Playlist Days by Album Type")
+    ax.set_xlabel("Album type")
+    ax.set_ylabel("Average days")
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
 
-fig, ax = plt.subplots(figsize=(8, 4))
-
-ax.bar(
-    album_summary["album_type"],
-    album_summary["average_playlist_days"]
+st.subheader("Album Size vs Playlist Longevity")
+size_source = lifecycle.copy()
+size_source["total_tracks"] = pd.to_numeric(size_source["total_tracks"], errors="coerce")
+size_source["album_size_group"] = pd.cut(
+    size_source["total_tracks"],
+    bins=[0, 1, 5, 10, 20, np.inf],
+    labels=["1 Track", "2–5 Tracks", "6–10 Tracks", "11–20 Tracks", "More than 20 Tracks"],
+    include_lowest=True
 )
+size_summary = size_source.groupby("album_size_group", observed=False).agg(
+    unique_songs=("song_id", "nunique"),
+    average_playlist_days=("observed_playlist_days", "mean"),
+    average_popularity=("average_popularity", "mean")
+).reset_index()
+st.dataframe(size_summary.round(2), use_container_width=True, hide_index=True)
+st.bar_chart(size_summary.set_index("album_size_group")["average_playlist_days"])
 
-ax.set_title("Single vs Album: Average Observed Days")
-ax.set_xlabel("Album Type")
-ax.set_ylabel("Observed Playlist Days")
 
-st.pyplot(fig)
-plt.close(fig)
-
-# --------------------------------------------------
-# POPULARITY AND DURATION
-# --------------------------------------------------
-
+# ----------------------- POPULARITY / DURATION ---------------
 st.header("6. Popularity and Duration Analysis")
+left, right = st.columns(2)
 
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Popularity vs Observed Days")
-
+with left:
+    st.subheader("Popularity vs Playlist Days")
     fig, ax = plt.subplots(figsize=(7, 4))
-
-    ax.scatter(
-        lifecycle["average_popularity"],
-        lifecycle["observed_playlist_days"],
-        alpha=0.6
-    )
-
-    ax.set_xlabel("Average Popularity")
-    ax.set_ylabel("Observed Playlist Days")
-
+    ax.scatter(lifecycle["average_popularity"], lifecycle["observed_playlist_days"], alpha=0.65)
+    ax.set_xlabel("Average popularity")
+    ax.set_ylabel("Observed playlist days")
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
+    correlation = lifecycle[["average_popularity", "observed_playlist_days"]].corr().iloc[0, 1]
+    st.write(f"Correlation: {correlation:.3f}" if pd.notna(correlation) else "Correlation unavailable")
 
-    popularity_corr = lifecycle[
-        ["average_popularity", "observed_playlist_days"]
-    ].corr().iloc[0, 1]
-
-    st.write(
-        f"Correlation: {popularity_corr:.3f}"
-        if pd.notna(popularity_corr)
-        else "Correlation: unavailable"
-    )
-
-with col2:
-    st.subheader("Duration vs Observed Days")
-
+with right:
+    st.subheader("Duration vs Playlist Days")
     fig, ax = plt.subplots(figsize=(7, 4))
-
-    ax.scatter(
-        lifecycle["duration_minutes"],
-        lifecycle["observed_playlist_days"],
-        alpha=0.6
-    )
-
-    ax.set_xlabel("Duration (Minutes)")
-    ax.set_ylabel("Observed Playlist Days")
-
+    ax.scatter(lifecycle["duration_minutes"], lifecycle["observed_playlist_days"], alpha=0.65)
+    ax.set_xlabel("Duration (minutes)")
+    ax.set_ylabel("Observed playlist days")
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
+    correlation = lifecycle[["duration_minutes", "observed_playlist_days"]].corr().iloc[0, 1]
+    st.write(f"Correlation: {correlation:.3f}" if pd.notna(correlation) else "Correlation unavailable")
 
-    duration_corr = lifecycle[
-        ["duration_minutes", "observed_playlist_days"]
-    ].corr().iloc[0, 1]
 
-    st.write(
-        f"Correlation: {duration_corr:.3f}"
-        if pd.notna(duration_corr)
-        else "Correlation: unavailable"
+# ----------------------- DAILY DATA VALIDATION ----------------
+st.header("7. Daily Record Validation")
+daily_validation = df.groupby("date").agg(
+    record_count=("song_id", "size"),
+    unique_songs=("song_id", "nunique"),
+    unique_positions=("position", "nunique"),
+    minimum_position=("position", "min"),
+    maximum_position=("position", "max")
+).reset_index()
+daily_validation["validation_status"] = np.where(
+    daily_validation["record_count"] == 50,
+    "Valid",
+    "Check Required"
+)
+issues = daily_validation[daily_validation["validation_status"] != "Valid"]
+v1, v2, v3 = st.columns(3)
+v1.metric("Playlist Dates", f"{len(daily_validation):,}")
+v2.metric("Dates with 50 Records", f"{(daily_validation['record_count'] == 50).sum():,}")
+v3.metric("Dates Requiring Investigation", f"{len(issues):,}")
+if not issues.empty:
+    st.warning(
+        "Some dates do not contain exactly 50 records. Investigate these records; "
+        "the dashboard does not automatically delete or force records to 50."
     )
+    st.dataframe(issues, use_container_width=True, hide_index=True)
+with st.expander("View all daily validation results"):
+    st.dataframe(daily_validation, use_container_width=True, hide_index=True)
 
-# --------------------------------------------------
-# DOWNLOAD ANALYSIS
-# --------------------------------------------------
 
-st.header("7. Download Results")
-
-csv_data = lifecycle.to_csv(index=False).encode("utf-8")
-
+# ----------------------- DOWNLOAD RESULTS ---------------------
+st.header("8. Download Results")
 st.download_button(
-    label="Download Song Lifecycle Analysis",
-    data=csv_data,
+    "Download Song Lifecycle Summary",
+    data=lifecycle.to_csv(index=False).encode("utf-8"),
     file_name="spain_top50_song_lifecycle.csv",
     mime="text/csv"
 )
+st.download_button(
+    "Download Filtered Playlist Records",
+    data=filtered.to_csv(index=False).encode("utf-8"),
+    file_name="spain_top50_filtered_records.csv",
+    mime="text/csv"
+)
+st.download_button(
+    "Download Daily Rotation Metrics",
+    data=rotation.to_csv(index=False).encode("utf-8"),
+    file_name="spain_top50_daily_rotation.csv",
+    mime="text/csv"
+)
+st.download_button(
+    "Download Daily Validation Report",
+    data=daily_validation.to_csv(index=False).encode("utf-8"),
+    file_name="spain_top50_daily_validation.csv",
+    mime="text/csv"
+)
+
+
