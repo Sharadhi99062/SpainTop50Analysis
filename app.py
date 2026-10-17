@@ -156,22 +156,49 @@ st.sidebar.caption("Filters affect the records and charts shown below.")
 min_date = df["date"].min().date()
 max_date = df["date"].max().date()
 
-selected_dates = st.sidebar.date_input(
-    "Select date range",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date
-)
+# English-formatted date selection
+col1, col2 = st.sidebar.columns(2)
 
-if isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 2:
-    start_date, end_date = selected_dates
-elif isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 1:
-    start_date = selected_dates[0]
-    end_date = selected_dates[0]
-else:
-    start_date = selected_dates
-    end_date = selected_dates
+with col1:
+    start_date_text = st.text_input(
+        "Start Date (YYYY-MM-DD)",
+        value=str(min_date),
+        key="start_date_english"
+    )
 
+with col2:
+    end_date_text = st.text_input(
+        "End Date (YYYY-MM-DD)",
+        value=str(max_date),
+        key="end_date_english"
+    )
+
+try:
+    start_date = pd.to_datetime(
+        start_date_text, format="%Y-%m-%d"
+    ).date()
+
+    end_date = pd.to_datetime(
+        end_date_text, format="%Y-%m-%d"
+    ).date()
+
+    if start_date < min_date or end_date > max_date:
+        st.sidebar.error(
+            f"Choose dates between {min_date} and {max_date}."
+        )
+        st.stop()
+
+    if start_date > end_date:
+        st.sidebar.error(
+            "Start Date must be before End Date."
+        )
+        st.stop()
+
+except ValueError:
+    st.sidebar.error(
+        "Enter dates in YYYY-MM-DD format, for example 2025-11-27."
+    )
+    st.stop()
 content_choice = st.sidebar.radio(
     "Explicit Content",
     ["All", "Clean only", "Explicit only"],
